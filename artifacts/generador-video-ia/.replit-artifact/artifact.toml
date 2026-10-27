@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Generador de Video IA"
+description = "Aplicación web para generar videos con IA a través de Replicate, revisar el estado de las predicciones y reproducir los videos terminados."
+version = "1.0.0"
+id = "artifacts/generador-video-ia"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 20085
+
+[services.development]
+run = "pnpm --filter @workspace/generador-video-ia run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/generador-video-ia", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/generador-video-ia/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "20085"
+BASE_PATH = "/"
