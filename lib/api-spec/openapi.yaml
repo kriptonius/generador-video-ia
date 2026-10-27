@@ -24,6 +24,80 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /generate:
+    post:
+      operationId: createVideoPrediction
+      tags: [video]
+      summary: Start a video generation prediction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VideoGenerationInput"
+      responses:
+        "202":
+          description: Prediction created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VideoPredictionCreated"
+        "400":
+          description: Invalid prompt or image
+        "502":
+          description: Replicate request failed
+  /status/{id}:
+    get:
+      operationId: getVideoPredictionStatus
+      tags: [video]
+      summary: Get a video prediction status
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Current prediction status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VideoPredictionStatus"
+        "404":
+          description: Prediction not found
+        "502":
+          description: Replicate request failed
+  /video/{id}:
+    get:
+      operationId: streamVideoPrediction
+      tags: [video]
+      summary: Stream the authenticated video output
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Generated video file
+          content:
+            video/mp4:
+              schema:
+                type: string
+                format: binary
+        "206":
+          description: Partial video content for playback seeking
+          content:
+            video/mp4:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Prediction not found
+        "502":
+          description: Replicate media request failed
 components:
   schemas:
     HealthStatus:
@@ -33,4 +107,50 @@ components:
           type: string
       required:
         - status
+    VideoGenerationInput:
+      type: object
+      properties:
+        prompt:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        image:
+          type: string
+          description: Optional image data URL, limited to 256 KB.
+      required:
+        - prompt
+    VideoPredictionCreated:
+      type: object
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+        model:
+          type: string
+        promptApplied:
+          type: boolean
+      required:
+        - id
+        - status
+        - model
+        - promptApplied
+    VideoPredictionStatus:
+      type: object
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [starting, processing, succeeded, failed, canceled, aborted]
+        output:
+          type: ["string", "null"]
+          description: Same-origin URL for authenticated video playback.
+        error:
+          type: ["string", "null"]
+      required:
+        - id
+        - status
+        - output
+        - error
 
