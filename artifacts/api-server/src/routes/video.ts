@@ -5,16 +5,19 @@ import {
   GetVideoPredictionStatusParams,
   GetVideoPredictionStatusResponse,
 } from "@workspace/api-zod";
-import { ReplitConnectors } from "@replit/connectors-sdk";
 import { Readable } from "node:stream";
 import { logger } from "../lib/logger";
 
 const router: IRouter = Router();
-const connectors = new ReplitConnectors();
+const REPLICATE_API_BASE_URL = "https://api.replicate.com";
 
 const MAX_IMAGE_DATA_URL_BYTES = 256 * 1024;
 const IMAGE_DATA_URL_PATTERN =
   /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
+const VIDEO_MODELS = {
+  image: "stability-ai/stable-video-diffusion",
+  prompt: "lucataco/animate-diff",
+} as const;
 const predictionStatuses = [
   "starting",
   "processing",
@@ -35,13 +38,62 @@ type ReplicatePrediction = {
   error?: unknown;
 };
 
+type ReplicateModel = {
+  latest_version?: {
+    id?: unknown;
+  };
+};
+
 function getErrorMessage(payload: unknown): string {
   if (payload && typeof payload === "object") {
     const record = payload as Record<string, unknown>;
     if (typeof record.detail === "string") return record.detail;
+    if (Array.isArray(record.detail)) {
+      const messages = record.detail
+        .map((item) =>
+          item && typeof item === "object" && "msg" in item
+            ? String(item.msg)
+            : "",
+        )
+        .filter(Boolean);
+      if (messages.length) return messages.join("; ");
+    }
     if (typeof record.error === "string") return record.error;
+    if (typeof record.message === "string") return record.message;
   }
   return "Replicate no pudo procesar la solicitud.";
+}
+
+function getReplicateToken(res: import("express").Response): string | null {
+  const token = process.env.REPLICATE_API_TOKEN?.trim();
+  if (!token) {
+    res.status(503).json({
+      error: "Falta configurar REPLICATE_API_TOKEN en los secretos del proyecto.",
+    });
+    return null;
+  }
+  return token;
+}
+
+function mapReplicateStatus(status: number): number {
+  return status >= 400 && status < 500 ? status : 502;
+}
+
+async function replicateRequest(
+  path: string,
+  token: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const headers = new Headers(init.headers);
+  headers.set("Authorization", `Bearer ${token}`);
+  if (init.body && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+
+  return fetch(`${REPLICATE_API_BASE_URL}${path}`, {
+    ...init,
+    headers,
+  });
 }
 
 function getOutputUrl(output: unknown): string | null {
@@ -95,8 +147,8 @@ router.post("/generate", async (req, res) => {
   }
 
   const model = image
-    ? "stability-ai/stable-video-diffusion"
-    : "lucataco/animate-diff";
+    ? VIDEO_MODELS.image
+    : VIDEO_MODELS.prompt;
   const input = image
     ? {
         input_image: image,
@@ -112,29 +164,61 @@ router.post("/generate", async (req, res) => {
         seed: 0,
       };
 
+  const token = getReplicateToken(res);
+  if (!token) return;
+
   try {
-    const upstream = await connectors.proxy(
-      "replicate",
-      `/v1/models/${model}/predictions`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ input }),
-      },
+    const modelPath = model
+      .split("/")
+      .map((segment) => encodeURIComponent(segment))
+      .join("/");
+    const modelResponse = await replicateRequest(
+      `/v1/models/${modelPath}`,
+      token,
+      { method: "GET" },
     );
+    const modelMetadata = (await modelResponse.json().catch(() => null)) as
+      | ReplicateModel
+      | null;
+
+    if (
+      !modelResponse.ok ||
+      !modelMetadata ||
+      typeof modelMetadata.latest_version?.id !== "string"
+    ) {
+      const error = getErrorMessage(modelMetadata);
+      logger.warn(
+        { statusCode: modelResponse.status, model, error },
+        "Replicate model lookup failed",
+      );
+      res.status(mapReplicateStatus(modelResponse.status)).json({ error });
+      return;
+    }
+
+    const upstream = await replicateRequest("/v1/predictions", token, {
+      method: "POST",
+      body: JSON.stringify({
+        version:
+          model === VIDEO_MODELS.image
+            ? model
+            : `${model}:${modelMetadata.latest_version.id}`,
+        input,
+      }),
+    });
 
     const prediction = (await upstream.json().catch(() => null)) as
       | ReplicatePrediction
       | null;
 
     if (!upstream.ok || !prediction || typeof prediction.id !== "string") {
+      const error = getErrorMessage(prediction);
       logger.warn(
-        { statusCode: upstream.status, model },
+        { statusCode: upstream.status, model, error },
         "Replicate rejected video generation request",
       );
-      res.status(502).json({
-        error: getErrorMessage(prediction),
-      });
+      const retryAfter = upstream.headers.get("retry-after");
+      if (retryAfter) res.setHeader("Retry-After", retryAfter);
+      res.status(mapReplicateStatus(upstream.status)).json({ error });
       return;
     }
 
@@ -166,11 +250,13 @@ router.get("/status/:id", async (req, res) => {
   }
 
   const id = parsedParams.data.id;
+  const token = getReplicateToken(res);
+  if (!token) return;
 
   try {
-    const upstream = await connectors.proxy(
-      "replicate",
+    const upstream = await replicateRequest(
       `/v1/predictions/${encodeURIComponent(id)}`,
+      token,
       { method: "GET" },
     );
     const prediction = (await upstream.json().catch(() => null)) as
@@ -192,7 +278,7 @@ router.get("/status/:id", async (req, res) => {
         { statusCode: upstream.status, predictionId: id },
         "Replicate status request failed",
       );
-      res.status(502).json({
+      res.status(mapReplicateStatus(upstream.status)).json({
         error: getErrorMessage(prediction),
       });
       return;
@@ -248,20 +334,15 @@ router.get("/video/:id", async (req, res) => {
     return;
   }
 
-  const token = process.env.REPLICATE_API_TOKEN;
-  if (!token) {
-    res.status(503).json({
-      error: "Falta configurar REPLICATE_API_TOKEN para transmitir el video.",
-    });
-    return;
-  }
+  const token = getReplicateToken(res);
+  if (!token) return;
 
   const id = parsedParams.data.id;
 
   try {
-    const predictionResponse = await connectors.proxy(
-      "replicate",
+    const predictionResponse = await replicateRequest(
       `/v1/predictions/${encodeURIComponent(id)}`,
+      token,
       { method: "GET" },
     );
     const prediction = (await predictionResponse.json().catch(() => null)) as
@@ -282,7 +363,9 @@ router.get("/video/:id", async (req, res) => {
         { statusCode: predictionResponse.status, predictionId: id },
         "Replicate video lookup failed",
       );
-      res.status(502).json({ error: getErrorMessage(prediction) });
+      res
+        .status(mapReplicateStatus(predictionResponse.status))
+        .json({ error: getErrorMessage(prediction) });
       return;
     }
 

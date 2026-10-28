@@ -1,0 +1,1 @@
+- [Replicate video constraints](replicate-video.md) — use Replicate only; SVD is image-conditioned, while prompt-only and media delivery need separate handling.
