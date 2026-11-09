@@ -5,3 +5,5 @@
 
 [build.environment]
   PORT = "3000"
+  BASE_PATH = "/"
+  NODE_VERSION = "20"
