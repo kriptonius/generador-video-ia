@@ -2,3 +2,6 @@
   base = "artifacts/generador-video-ia"
   publish = "dist"
   command = "npm run build"
+
+[build.environment]
+  PORT = "3000"
