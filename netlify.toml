@@ -1,7 +1,6 @@
 [build]
-  base = "artifacts/generador-video-ia"
-  publish = "dist"
-  command = "npm run build"
+  publish = "artifacts/generador-video-ia/dist"
+  command = "cd artifacts/generador-video-ia && npm run build"
 
 [build.environment]
   PORT = "3000"
